@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: juice-shop
-        image: 100.93.190.2:5000/juice-shop:build-1 
+        image: 100.93.190.2:5000/juice-shop:build-2
         imagePullPolicy: Never
         ports:
         - containerPort: 3000

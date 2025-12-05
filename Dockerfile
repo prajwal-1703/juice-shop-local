@@ -1,4 +1,4 @@
-FROM node:22 AS installer
+FROM node:20-bullseye-slim as installer
 COPY . /juice-shop
 WORKDIR /juice-shop
 RUN npm i -g typescript ts-node

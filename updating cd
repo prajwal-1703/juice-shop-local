@@ -54,14 +54,14 @@ pipeline {
 
     environment {
         // YOUR KALI IP HERE
-        REGISTRY = "100.93.190.2:5000" 
+        REGISTRY = "100.93.190.2:5000"
         IMAGE_NAME = "juice-shop"
         IMAGE = "${REGISTRY}/${IMAGE_NAME}"
         TAG = "build-${BUILD_NUMBER}"
         
-        // YOUR UBUNTU IP HERE (Port 30080 is where Juice Shop runs)
+        // YOUR UBUNTU IP HERE (Juice Shop runs on NodePort 30080)
         TARGET_URL = "http://100.77.83.125:30080"
-        
+
         scannerHome = tool 'SonarQubeScanner'
     }
 
@@ -90,9 +90,6 @@ pipeline {
 
         stage('Container Security - Trivy') {
             steps {
-                // Scans the image we just built.
-                // --exit-code 0 means "Don't stop the pipeline even if vulns found" (Good for first run)
-                // --severity HIGH,CRITICAL means only show me the big stuff.
                 sh "trivy image --exit-code 0 --severity HIGH,CRITICAL --no-progress ${IMAGE}:${TAG}"
             }
         }
@@ -105,15 +102,34 @@ pipeline {
             }
         }
 
-        /* Skipping Automated Deploy for now to keep your manual setup safe.
-           The ZAP scan below will attack the ALREADY RUNNING app on Ubuntu.
-        */
+        /* ---------------------- NEW DEPLOYMENT STAGE ---------------------- */
+
+        stage('Deploy to Production') {
+            steps {
+                script {
+                    echo "Deploying to Ubuntu Minikube Cluster..."
+
+                    // 1. Pull new image on Ubuntu host
+                    sh "ssh -o StrictHostKeyChecking=no thekernelghost@100.77.83.125 'docker pull ${IMAGE}:${TAG}'"
+
+                    // 2. Load into Minikube internal cache
+                    sh "ssh -o StrictHostKeyChecking=no thekernelghost@100.77.83.125 'minikube image load ${IMAGE}:${TAG}'"
+
+                    // 3. Update deployment image
+                    sh "ssh -o StrictHostKeyChecking=no thekernelghost@100.77.83.125 'kubectl set image deployment/juice-shop juice-shop=${IMAGE}:${TAG}'"
+
+                    // 4. Wait for rollout
+                    sleep 20
+                }
+            }
+        }
+
+        /* ---------------------- DAST STAGE ---------------------- */
 
         stage('DAST - OWASP ZAP Scan') {
             steps {
                 script {
                     echo "Starting ZAP Scan against ${TARGET_URL}"
-                    // Runs the script we made in Step 5.1
                     sh "bash ci/zap.sh ${TARGET_URL}"
                 }
             }
@@ -122,7 +138,6 @@ pipeline {
 
     post {
         always {
-            // This saves the ZAP report so you can see it in Jenkins
             archiveArtifacts artifacts: 'zap-report.html', allowEmptyArchive: true
         }
     }

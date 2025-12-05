@@ -1,66 +1,105 @@
-# 1. Installer Stage (Uses Debian Slim for smaller size)
-FROM node:20-bullseye-slim AS installer
+/*
+ * Copyright (c) 2014-2026 Bjoern Kimminich & the OWASP Juice Shop contributors.
+ * SPDX-License-Identifier: MIT
+ */
 
-# --- FIX START: Install Git and Build Tools ---
-# We need git for dependencies hosted on GitHub
-# We need python3 & build-essential for compiling native modules (sqlite3, etc.)
-RUN apt-get update && \
-    apt-get install -y git build-essential python3 && \
-    rm -rf /var/lib/apt/lists/*
-# --- FIX END ---
+import { type Request, type Response, type NextFunction } from 'express'
+import * as utils from '../lib/utils'
+import * as models from '../models/index'
+import { UserModel } from '../models/user'
+import { challenges } from '../data/datacache'
+import * as challengeUtils from '../lib/challengeUtils'
 
-COPY . /juice-shop
-WORKDIR /juice-shop
+class ErrorWithParent extends Error {
+  parent: Error | undefined
+}
 
-RUN npm i -g typescript ts-node
-RUN npm install --omit=dev --unsafe-perm
-RUN npm dedupe --omit=dev
+// vuln-code-snippet start unionSqlInjectionChallenge dbSchemaChallenge
+export function searchProducts () {
+  return (req: Request, res: Response, next: NextFunction) => {
+    let criteria: any = req.query.q === 'undefined' ? '' : req.query.q ?? ''
+    criteria = (criteria.length <= 200) ? criteria : criteria.substring(0, 200)
 
-# Cleanup to reduce image size
-RUN rm -rf frontend/node_modules
-RUN rm -rf frontend/.angular
-RUN rm -rf frontend/src/assets
+    // ✅ SECURITY FIX: Parameterized query to prevent SQL injection
+    models.sequelize.query(
+      `SELECT * FROM Products
+       WHERE (
+         (name LIKE :criteria OR description LIKE :criteria)
+         AND deletedAt IS NULL
+       )
+       ORDER BY name`,
+      {
+        replacements: { criteria: `%${criteria}%` }
+      }
+    )
+      .then((result: any) => {
+        const products = result[0]   // Sequelize returns [rows, metadata]
+        const dataString = JSON.stringify(products)
 
-# Create logs and set permissions
-RUN mkdir logs
-RUN chown -R 65532 logs
-RUN chgrp -R 0 ftp/ frontend/dist/ logs/ data/ i18n/
-RUN chmod -R g=u ftp/ frontend/dist/ logs/ data/ i18n/
+        /* ---------------------------------------------
+         * Challenge Logic (Kept Intact for Juice Shop)
+         * --------------------------------------------- */
 
-# Remove sensitive or unused files
-RUN rm data/chatbot/botDefaultTrainingData.json || true
-RUN rm ftp/legal.md || true
-RUN rm i18n/*.json || true
+        // UNION SQL Injection Challenge (now cannot be solved due to fix)
+        if (challengeUtils.notSolved(challenges.unionSqlInjectionChallenge)) {
+          UserModel.findAll()
+            .then(data => {
+              const users = utils.queryResultToJson(data)
+              let solved = true
 
-# Generate SBOM (Software Bill of Materials)
-ARG CYCLONEDX_NPM_VERSION=latest
-RUN npm install -g @cyclonedx/cyclonedx-npm@$CYCLONEDX_NPM_VERSION
-RUN npm run sbom
+              if (users.data?.length) {
+                for (const user of users.data) {
+                  solved =
+                    solved &&
+                    utils.containsOrEscaped(dataString, user.email) &&
+                    utils.contains(dataString, user.password)
 
-# 2. Final Runtime Stage (Distroless for Security)
-# CHANGED: Using nodejs20 to match the installer stage (prevents ABI mismatch errors)
-FROM gcr.io/distroless/nodejs20-debian11
+                  if (!solved) break
+                }
 
-ARG BUILD_DATE
-ARG VCS_REF
-LABEL maintainer="Bjoern Kimminich <bjoern.kimminich@owasp.org>" \
-    org.opencontainers.image.title="OWASP Juice Shop" \
-    org.opencontainers.image.description="Probably the most modern and sophisticated insecure web application" \
-    org.opencontainers.image.authors="Bjoern Kimminich <bjoern.kimminich@owasp.org>" \
-    org.opencontainers.image.vendor="Open Worldwide Application Security Project" \
-    org.opencontainers.image.documentation="https://help.owasp-juice.shop" \
-    org.opencontainers.image.licenses="MIT" \
-    org.opencontainers.image.version="19.1.1" \
-    org.opencontainers.image.url="https://owasp-juice.shop" \
-    org.opencontainers.image.source="https://github.com/juice-shop/juice-shop" \
-    org.opencontainers.image.revision=$VCS_REF \
-    org.opencontainers.image.created=$BUILD_DATE
+                if (solved) {
+                  challengeUtils.solve(challenges.unionSqlInjectionChallenge)
+                }
+              }
+            })
+            .catch((err: Error) => next(err))
+        }
 
-WORKDIR /juice-shop
+        // DB Schema Challenge
+        if (challengeUtils.notSolved(challenges.dbSchemaChallenge)) {
+          models.sequelize.query('SELECT sql FROM sqlite_master')
+            .then((schemaResult: any) => {
+              const schemaRows = schemaResult[0]
+              const tableDefinitions = utils.queryResultToJson(schemaRows)
+              let solved = true
 
-# Copy the built application from the installer stage
-COPY --from=installer --chown=65532:0 /juice-shop .
+              if (tableDefinitions.data?.length) {
+                for (const row of tableDefinitions.data) {
+                  if (row.sql) {
+                    solved = solved && utils.containsOrEscaped(dataString, row.sql)
+                    if (!solved) break
+                  }
+                }
 
-USER 65532
-EXPOSE 3000
-CMD ["/juice-shop/build/app.js"]
+                if (solved) {
+                  challengeUtils.solve(challenges.dbSchemaChallenge)
+                }
+              }
+            })
+            .catch((err: Error) => next(err))
+        }
+
+        // Translate product fields
+        for (const p of products) {
+          p.name = req.__(p.name)
+          p.description = req.__(p.description)
+        }
+
+        return res.json(utils.queryResultToJson(products))
+      })
+      .catch((error: ErrorWithParent) => {
+        next(error.parent)
+      })
+  }
+}
+// vuln-code-snippet end unionSqlInjectionChallenge dbSchemaChallenge

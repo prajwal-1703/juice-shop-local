@@ -1,5 +1,5 @@
 # 1. Installer Stage (Uses Debian Slim for smaller size)
-FROM node:20-bullseye-slim as installer
+FROM node:20-bullseye-slim AS installer
 
 # --- FIX START: Install Git and Build Tools ---
 # We need git for dependencies hosted on GitHub
